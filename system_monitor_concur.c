@@ -566,8 +566,6 @@ int main(int argc, char **argv) {
 	sysinfo(&systemInfo);
 	long uptime = systemInfo.uptime;
 	
-	// TEST
-	uptime += 200000;
 	int daysUptime = floor(uptime / 86400);
 	int hoursUptime = floor((uptime % 86400) / 3600);
 	int minsUptime = floor((uptime % 3600) / 60);

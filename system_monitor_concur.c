@@ -453,8 +453,8 @@ int main(int argc, char **argv) {
 	for (int i = 0; i < samples; i++) {
 		// Read data from child handling memory usage
 		float memData[4];
-		for (int i = 0; i < 4; i++) {
-			if (read(memFD[0], &memData[i], sizeof(float)) <= 0) {
+		for (int j = 0; j < 4; j++) {
+			if (read(memFD[0], &memData[j], sizeof(float)) <= 0) {
 				fprintf(stderr, "Could not read 4 elements from memory pipe\n");
 				exit(1);
 			}
@@ -476,7 +476,7 @@ int main(int argc, char **argv) {
 		if (!sequential) printf("\033[2J\033[H");
 		
 		// Print initial data (samples, delay, self-memory utilization)
-		if (sequential) printf(">>> iteration %d\n", i);
+		if (sequential) printf("\n>>> iteration %d \n", i);
 		else printf("Nbr of samples: %d -- every %d secs\n", samples, delay);
 		printf(" Memory usage: %ld kilobytes\n", curProgMem);
 		printSectionLine();
@@ -540,6 +540,8 @@ int main(int argc, char **argv) {
 			printf(" total cpu use = %.2f%%\n", getLastCpuUse(cpuHead));
 			if (graphics) printCList(cpuHead, sequential);
 		}
+		
+		if (graphics) printf("\033[%dB", i + 1);	// Realign output pointer
 	}
 	
 	// Sleep remaining time
@@ -549,8 +551,6 @@ int main(int argc, char **argv) {
 	if (close(memFD[0]) == -1 || close(userFD[0]) == -1 || close(cpuFD[0]) == -1) {
 		perror("close");
 	}
-	
-	if (graphics) printf("\033[%dB", samples);	// Realign output pointer
 	
 	/* GET SYSTEM INFORMATION */
 	struct utsname kernalInfo;

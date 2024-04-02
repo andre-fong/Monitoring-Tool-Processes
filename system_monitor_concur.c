@@ -10,7 +10,6 @@
 #include<utmp.h>
 #include<unistd.h>
 #include<signal.h>
-#include<sys/wait.h>
 
 #include "stats_functions.h"
 
@@ -211,6 +210,68 @@ void deleteCList(CpuUseNode *head) {
 	}
 }
 
+/* Function for signal handler (SIGINT)
+ * Prompts user if they want to quit the program, and
+ * quits if given 'y'/'Y'; stays if given 'n'/'N'.
+ */
+void handler(int code) {
+	// NOTE: We ensure all functions used in this handler
+	// are async-safe.
+	
+	if (code != SIGINT) return;		// do nothing
+	
+	// Pause child processes by sending custom signal
+	kill(-getpid(), SIGUSR1);
+	
+	char line[MAXSIZE];
+	write(STDOUT_FILENO, "\n", 1);
+	
+	while(1) {
+		write(STDOUT_FILENO, "Are you sure you want to quit? (Y/n): ", 38);
+		
+		if (read(STDIN_FILENO, line, MAXSIZE) == -1) return;
+		
+		if (line[0] == 'y' || line[0] == 'Y') {
+			// Terminate parent and child processes
+			kill(-getpid(), SIGTERM);
+		}
+		
+		if (line[0] == 'n' || line[0] == 'N') {
+			kill(-getpid(), SIGCONT);
+			break;
+		}
+	}
+}
+
+/* Function for custom signal handler (SIGUSR1), used for children
+ * Sends SIGSTOP to process.
+ */
+void customSigHandler(int code) {
+	// NOTE: We ensure all functions used in this handler
+	// are async-safe.
+
+	if (code != SIGUSR1) return;	// do nothing
+	
+	kill(getpid(), SIGSTOP);
+}
+
+/* Function to handle any process receiving SIGTERM, freeing allocated memory.
+ * Terminates with exit code 0.
+ */
+void customTerminateHandler(int code) {
+	// NOTE: We ensure all functions used in this handler
+	// are async-safe.
+	
+	if (code != SIGTERM) return;
+	
+	// TODO: memory deallocation
+		// Free linked lists (2) in PARENT
+		// Close read ends of pipes (3) in PARENT
+		// Close open files in CHILD
+	
+	exit(0);
+}
+
 int main(int argc, char **argv) {
 	/* Initialize variables and CLAs */
 	
@@ -320,9 +381,35 @@ int main(int argc, char **argv) {
 		exit(1);
 	}
 	
+	// Child processes should ignore SIGINT (parent modifies SIGINT handler later)
+	struct sigaction ignact;
+	ignact.sa_handler = SIG_IGN;
+	ignact.sa_flags = 0;
+	sigemptyset(&ignact.sa_mask);
+	sigaction(SIGINT, &ignact, NULL);
+	
+	// ALL processes should ignore SIGTSTP
+	sigaction(SIGTSTP, &ignact, NULL);
+	
+	// ALL processes should exit w code of 0 upon receiving SIGTERM
+	struct sigaction termact;
+	termact.sa_handler = customTerminateHandler;
+	termact.sa_flags = 0;
+	sigemptyset(&termact.sa_mask);
+	sigaction(SIGTERM, &termact, NULL);
+	
 	// Fork 3 children
 	for (int i = 0; i < 3; i++) {
 		forkRet = fork();
+		
+		if (forkRet == 0) {
+			// Child processes should STOP after receiving custom signal SIGUSR1
+			struct sigaction newact;
+			newact.sa_handler = customSigHandler;
+			newact.sa_flags = SA_RESTART;
+			sigemptyset(&newact.sa_mask);
+			sigaction(SIGUSR1, &newact, NULL);
+		}
 		
 		// Child for getting MEMORY USAGE (1)
 		if (forkRet == 0 && i == 0) {
@@ -441,6 +528,16 @@ int main(int argc, char **argv) {
 	}
 	
 	/* PARENT PROCESS */
+	
+	// Parent should have modified signal handler for SIGINT
+	struct sigaction newact;
+	newact.sa_handler = handler;
+	newact.sa_flags = SA_RESTART;
+	sigemptyset(&newact.sa_mask);
+	sigaction(SIGINT, &newact, NULL);
+	
+	// Parent should ignore custom signal (used for children)
+	sigaction(SIGUSR1, &ignact, NULL);
 	
 	// Close write end of pipes
 	if (close(memFD[1]) == -1 || close(userFD[1]) == -1 || close(cpuFD[1]) == -1) {

@@ -10,6 +10,7 @@
 #include<utmp.h>
 #include<unistd.h>
 #include<signal.h>
+#include<sys/wait.h>
 
 #include "stats_functions.h"
 
@@ -183,7 +184,7 @@ float getLastCpuUse(CpuUseNode *head) {
 	return tr->cpuUse;
 }
 void printCList(CpuUseNode *head, bool sequential) {
-	CpuUseNode *tr = head;
+	CpuUseNode *tr = head->next;
 	int lineCounter = 0;
 	while (tr != NULL) {
 		printf("\033[K\t");
@@ -210,15 +211,23 @@ void deleteCList(CpuUseNode *head) {
 	}
 }
 
-/* Function for signal handler (SIGINT)
+/* Function for signal handler (SIGINT) in parent process
  * Prompts user if they want to quit the program, and
  * quits if given 'y'/'Y'; stays if given 'n'/'N'.
  */
-void handler(int code) {
+void handler(int code, void *memoryHead, void *cpuHead) {
 	// NOTE: We ensure all functions used in this handler
 	// are async-safe.
 	
-	if (code != SIGINT) return;		// do nothing
+	static MemoryNode *mhead = NULL;
+	static CpuUseNode *chead = NULL;
+	
+	if (mhead == NULL && chead == NULL) {
+		mhead = memoryHead;
+		chead = cpuHead;
+	}
+	
+	if (code != SIGINT) return;		// do nothing if signal received was not SIGINT
 	
 	// Pause child processes by sending custom signal
 	kill(-getpid(), SIGUSR1);
@@ -232,13 +241,18 @@ void handler(int code) {
 		if (read(STDIN_FILENO, line, MAXSIZE) == -1) return;
 		
 		if (line[0] == 'y' || line[0] == 'Y') {
+			// Free linked lists (2) in PARENT
+			deleteMList(mhead);
+			deleteCList(chead);
+			
 			// Terminate parent and child processes
 			kill(-getpid(), SIGTERM);
 		}
 		
 		if (line[0] == 'n' || line[0] == 'N') {
+			// Send SIGCONT to continue children
 			kill(-getpid(), SIGCONT);
-			break;
+			break;	// continue main program (parent)
 		}
 	}
 }
@@ -264,12 +278,16 @@ void customTerminateHandler(int code) {
 	
 	if (code != SIGTERM) return;
 	
-	// TODO: memory deallocation
-		// Free linked lists (2) in PARENT
-		// Close read ends of pipes (3) in PARENT
-		// Close open files in CHILD
+	// Close all open FDs for processes
+	struct rlimit rlim;
+	getrlimit(RLIMIT_NOFILE, &rlim);
 	
-	exit(0);
+	for (int i = 3; i < rlim.rlim_cur; i++) {
+		printf("%d\n", i);
+		close(i);
+	}
+	
+	_exit(0);
 }
 
 int main(int argc, char **argv) {
@@ -371,6 +389,9 @@ int main(int argc, char **argv) {
 	MemoryNode *memoryHead = NULL;
 	CpuUseNode *cpuHead = NULL;
 	
+	// Dummy first node
+	cpuHead = newCNode(0);
+	
 	/* Fork thrice, pass info to children to determine their task */
 	pid_t forkRet;
 	
@@ -409,6 +430,9 @@ int main(int argc, char **argv) {
 			newact.sa_flags = SA_RESTART;
 			sigemptyset(&newact.sa_mask);
 			sigaction(SIGUSR1, &newact, NULL);
+			
+			// Child process should delete dummy node for CPU list
+			deleteCList(cpuHead);
 		}
 		
 		// Child for getting MEMORY USAGE (1)
@@ -531,7 +555,7 @@ int main(int argc, char **argv) {
 	
 	// Parent should have modified signal handler for SIGINT
 	struct sigaction newact;
-	newact.sa_handler = handler;
+	newact.sa_handler = (void (*)(int))handler;
 	newact.sa_flags = SA_RESTART;
 	sigemptyset(&newact.sa_mask);
 	sigaction(SIGINT, &newact, NULL);
@@ -563,6 +587,9 @@ int main(int argc, char **argv) {
 			MemoryNode *new = newMNode(memData[0], memData[1], memData[2], memData[3]);
 			insertMAtTail(memoryHead, new);
 		}
+		
+		// Now that both memoryHead and cpuHead exist, call handler and initialize static pointers to linked lists
+		handler(-999, memoryHead, cpuHead);	// call handler w/ mock signal to initialize static pointers to linked list
 		
 		// Get self-memory utilization
 		struct rusage usage;
@@ -607,7 +634,7 @@ int main(int argc, char **argv) {
 			else printf("Number of cores: %d\n", cores);
 		}
 		
-		if (cpuHead != NULL && (!user || system)) {
+		if (cpuHead->next != NULL && (!user || system)) {
 			printf(" total cpu use = %.2f%%\n", getLastCpuUse(cpuHead));
 			if (graphics) printCList(cpuHead, sequential);
 		}
@@ -623,11 +650,8 @@ int main(int argc, char **argv) {
 		}
 		
 		// Write new cpu usage stat to linked list
-		if (cpuHead == NULL) cpuHead = newCNode(cpuUsage);
-		else {
-			CpuUseNode *new = newCNode(cpuUsage);
-			insertCAtTail(cpuHead, new);
-		}
+		CpuUseNode *new = newCNode(cpuUsage);
+		insertCAtTail(cpuHead, new);
 		
 		// Update (print) cpu usage without clearing screen
 		if (!user || system) {
@@ -690,6 +714,11 @@ int main(int argc, char **argv) {
 	// Free allocated memory
 	deleteMList(memoryHead);
 	deleteCList(cpuHead);
+	
+	// Wait for children to terminate before terminating (shouldn't wait at all)
+	wait(NULL);
+	wait(NULL);
+	wait(NULL);	// since only 3 children created
 	
 	return 0;
 }
